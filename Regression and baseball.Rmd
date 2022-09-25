@@ -1,0 +1,655 @@
+---
+title: "Regression and Baseball"
+output: html_notebook
+---
+
+<h2>Building a Better Offensive Metric for Baseball: Linear Programming
+Level 2 headings may be created by course providers in the future.
+</h2>
+
+A way to actually pick the players for the team can be done using what computer scientists call linear programming. Although we don't go into this topic in detail in this course, we include the code anyway:
+
+```{r}
+# linear regression with two variables
+fit <- Teams %>% 
+  filter(yearID %in% 1961:2001) %>% 
+  mutate(BB = BB/G, HR = HR/G,  R = R/G) %>%  
+  lm(R ~ BB + HR, data = .)
+  tidy(fit, conf.int = TRUE)
+  
+# regression with BB, singles, doubles, triples, HR
+fit <- Teams %>% 
+  filter(yearID %in% 1961:2001) %>% 
+  mutate(BB = BB / G, 
+         singles = (H - X2B - X3B - HR) / G, 
+         doubles = X2B / G, 
+         triples = X3B / G, 
+         HR = HR / G,
+         R = R / G) %>%  
+  lm(R ~ BB + singles + doubles + triples + HR, data = .)
+coefs <- tidy(fit, conf.int = TRUE)
+coefs
+
+# predict number of runs for each team in 2002 and plot
+Teams %>% 
+  filter(yearID %in% 2002) %>% 
+  mutate(BB = BB/G, 
+         singles = (H-X2B-X3B-HR)/G, 
+         doubles = X2B/G, 
+         triples =X3B/G, 
+         HR=HR/G,
+         R=R/G)  %>% 
+  mutate(R_hat = predict(fit, newdata = .)) %>%
+  ggplot(aes(R_hat, R, label = teamID)) + 
+  geom_point() +
+  geom_text(nudge_x=0.1, cex = 2) + 
+  geom_abline()
+  
+# average number of team plate appearances per game
+pa_per_game <- Batting %>% filter(yearID == 2002) %>% 
+  group_by(teamID) %>%
+  summarize(pa_per_game = sum(AB+BB)/max(G)) %>% 
+  pull(pa_per_game) %>% 
+  mean
+  
+# compute per-plate-appearance rates for players available in 2002 using previous data
+players <- Batting %>% filter(yearID %in% 1999:2001) %>% 
+  group_by(playerID) %>%
+  mutate(PA = BB + AB) %>%
+  summarize(G = sum(PA)/pa_per_game,
+    BB = sum(BB)/G,
+    singles = sum(H-X2B-X3B-HR)/G,
+    doubles = sum(X2B)/G, 
+    triples = sum(X3B)/G, 
+    HR = sum(HR)/G,
+    AVG = sum(H)/sum(AB),
+    PA = sum(PA)) %>%
+  filter(PA >= 300) %>%
+  select(-G) %>%
+  mutate(R_hat = predict(fit, newdata = .))
+  
+# plot player-specific predicted runs
+qplot(R_hat, data = players, geom = "histogram", binwidth = 0.5, color = I("black"))
+
+# add 2002 salary of each player
+players <- Salaries %>% 
+  filter(yearID == 2002) %>%
+  select(playerID, salary) %>%
+  right_join(players, by="playerID")
+  
+# add defensive position
+position_names <- c("G_p","G_c","G_1b","G_2b","G_3b","G_ss","G_lf","G_cf","G_rf")
+tmp_tab <- Appearances %>% 
+  filter(yearID == 2002) %>% 
+  group_by(playerID) %>%
+  summarize_at(position_names, sum) %>%
+  ungroup()  
+pos <- tmp_tab %>%
+  select(position_names) %>%
+  apply(., 1, which.max) 
+players <- data_frame(playerID = tmp_tab$playerID, POS = position_names[pos]) %>%
+  mutate(POS = str_to_upper(str_remove(POS, "G_"))) %>%
+  filter(POS != "P") %>%
+  right_join(players, by="playerID") %>%
+  filter(!is.na(POS)  & !is.na(salary))
+  
+# add players' first and last names
+players <- Master %>%
+  select(playerID, nameFirst, nameLast, debut) %>%
+  mutate(debut = as.Date(debut)) %>%
+  right_join(players, by="playerID")
+  
+# top 10 players
+players %>% select(nameFirst, nameLast, POS, salary, R_hat) %>% 
+  arrange(desc(R_hat)) %>% 
+  top_n(10) 
+  
+# players with a higher metric have higher salaries
+players %>% ggplot(aes(salary, R_hat, color = POS)) + 
+  geom_point() +
+  scale_x_log10()
+  
+# remake plot without players that debuted after 1998
+library(lubridate)
+players %>% filter(year(debut) < 1998) %>%
+ ggplot(aes(salary, R_hat, color = POS)) + 
+  geom_point() +
+  scale_x_log10()
+
+```
+
+<h3>Regression Fallacy </h3>
+
+The code to create a table with player ID, their names, and their most played position:
+
+```{r}
+
+library(Lahman)
+playerInfo <- Fielding %>%
+    group_by(playerID) %>%
+    arrange(desc(G)) %>%
+    slice(1) %>%
+    ungroup %>%
+    left_join(Master, by="playerID") %>%
+    select(playerID, nameFirst, nameLast, POS)
+```
+The code to create a table with only the ROY award winners and add their batting statistics:
+```{r}
+ROY <- AwardsPlayers %>%
+    filter(awardID == "Rookie of the Year") %>%
+    left_join(playerInfo, by="playerID") %>%
+    rename(rookie_year = yearID) %>%
+    right_join(Batting, by="playerID") %>%
+    mutate(AVG = H/AB) %>%
+    filter(POS != "P")
+```
+
+The code to keep only the rookie and sophomore seasons and remove players who did not play sophomore seasons:
+
+```{r}
+ROY <- ROY %>%
+    filter(yearID == rookie_year | yearID == rookie_year+1) %>%
+    group_by(playerID) %>%
+    mutate(rookie = ifelse(yearID == min(yearID), "rookie", "sophomore")) %>%
+    filter(n() == 2) %>%
+    ungroup %>%
+    select(playerID, rookie_year, rookie, nameFirst, nameLast, AVG)
+```
+
+The code to use the spread function to have one column for the rookie and sophomore years batting averages:
+
+```{r}
+ROY <- ROY %>% spread(rookie, AVG) %>% arrange(desc(rookie))
+ROY
+```
+
+The code to calculate the proportion of players who have a lower batting average their sophomore year:
+```{r}
+mean(ROY$sophomore - ROY$rookie <= 0)
+
+```
+The code to do the similar analysis on all players that played the 2013 and 2014 seasons and batted more than 130 times (minimum to win Rookie of the Year):
+```{r}
+two_years <- Batting %>%
+    filter(yearID %in% 2013:2014) %>%
+    group_by(playerID, yearID) %>%
+    filter(sum(AB) >= 130) %>%
+    summarize(AVG = sum(H)/sum(AB)) %>%
+    ungroup %>%
+    spread(yearID, AVG) %>%
+    filter(!is.na(`2013`) & !is.na(`2014`)) %>%
+    left_join(playerInfo, by="playerID") %>%
+    filter(POS!="P") %>%
+    select(-POS) %>%
+    arrange(desc(`2013`)) %>%
+    select(nameFirst, nameLast, `2013`, `2014`)
+two_years
+```
+The code to see what happens to the worst performers of 2013:
+```{r}
+arrange(two_years, `2013`)
+
+
+```
+
+The code to see  the correlation for performance in two separate years:
+
+```{r}
+qplot(`2013`, `2014`, data = two_years)
+
+summarize(two_years, cor(`2013`,`2014`))
+
+```
+
+Measurement Error Models
+```{r}
+library(dslabs)
+falling_object <- rfalling_object()
+falling_object %>%
+    ggplot(aes(time, observed_distance)) +
+    geom_point() +
+    ylab("Distance in meters") +
+    xlab("Time in seconds")
+```
+
+The code to use the lm() function to estimate the coefficients:
+```{r}
+fit <- falling_object %>%
+    mutate(time_sq = time^2) %>%
+    lm(observed_distance~time+time_sq, data=.)
+
+tidy(fit)
+
+```
+The code to check if the estimated parabola fits the data:
+```{r}
+augment(fit) %>%
+    ggplot() +
+    geom_point(aes(time, observed_distance)) +
+    geom_line(aes(time, .fitted), col = "blue")
+
+```
+The code to see the summary statistic of the regression:
+```{r}
+tidy(fit, conf.int = TRUE)
+```
+We want to estimate runs per game scored by individual players, not just by teams. What summary metric do we calculate to help estimate this?
+
+```{r}
+pa_per_game <- Batting %>% 
+  filter(yearID == 2002) %>% 
+  group_by(teamID) %>%
+  summarize(pa_per_game = sum(AB+BB)/max(G)) %>% 
+  .$pa_per_game %>% 
+  mean
+#the number of plate appearances per team per game, averaged across all teams
+
+```
+
+9a. What is the estimate for the effect of BB on runs? 
+```{r}
+Teams %>%
+    filter(yearID == 1971) %>%
+    lm(R ~ BB + HR, data = .) %>%
+    tidy() %>%
+    filter(term == "BB") %>%
+    pull(estimate)
+```
+What is the estimate for the effect of HR on runs?
+```{r}
+Teams %>%
+    filter(yearID == 1971) %>%
+    lm(R ~ BB + HR, data = .) %>%
+    tidy() %>%
+    filter(term == "HR") %>%
+    pull(estimate)
+```
+
+
+```{r}
+fit <- Teams %>% filter(yearID %in% 1971) %>% 
+mutate(BB = BB/G, HR = HR/G,  R = R/G) %>%  
+lm(R ~ BB + HR, data = .)
+tidy(fit, conf.int = TRUE)
+```
+The p-value for HR is less than 0.05, but the p-value of BB is greater than 0.05 (0.06), so the evidence is not strong enough to suggest that BB has a significant effect on runs at a p-value cutoff of 0.05.
+
+10. Repeat the above exercise to find the effects of BB and HR on runs (```R```) for every year from 1961 to 2018 using ```do()``` and the **broom** package.
+
+Make a scatterplot of the estimate for the effect of BB on runs over time and add a trend line with confidence intervals.
+```{r}
+res <- Teams %>%
+    filter(yearID %in% 1961:2018) %>%
+    group_by(yearID) %>%
+    do(tidy(lm(R ~ BB + HR, data = .))) %>%
+    ungroup() 
+res %>%
+    filter(term == "BB") %>%
+    ggplot(aes(yearID, estimate)) +
+    geom_point() +
+    geom_smooth(method = "lm")
+```
+
+
+11. Fit a linear model on the results from Question 10 to determine the effect of year on the impact of BB.
+
+For each additional year, by what value does the impact of BB on runs change?
+```{r}
+res %>%
+    filter(term == "BB") %>%
+    lm(estimate ~ yearID, data = .) %>%
+    tidy() %>%
+    filter(term == "yearID") %>%
+    pull(estimate)
+```
+p- value
+```{r}
+res %>%
+    filter(term == "BB") %>%
+    lm(estimate ~ yearID, data = .) %>%
+    tidy() %>%
+    filter(term == "yearID") %>%
+    pull(p.value)
+```
+
+Assessment: Linear Models 
+Game attendance in baseball varies partly as a function of how well a team is playing.
+
+Load the Lahman library. The Teams data frame contains an attendance column. This is the total attendance for the season. To calculate average attendance, divide by the number of games played, as follows:
+
+```{r}
+library(tidyverse)
+library(broom)
+library(Lahman)
+Teams_small <- Teams %>% 
+    filter(yearID %in% 1961:2001) %>% 
+    mutate(avg_attendance = attendance/G)
+```
+
+Use runs (R) per game to predict average attendance.
+
+For every 1 run scored per game, average attendance increases by how much?
+```{r}
+Teams_small %>% 
+  mutate(R_per_game = R/G) %>% 
+  lm(avg_attendance ~ R_per_game, data = .) %>% 
+  .$coef %>%
+  .[2]
+```
+Use home runs (HR) per game to predict average attendance.
+
+For every 1 home run hit per game, average attendance increases by how much?
+```{r}
+Teams_small %>% 
+  mutate(HR_per_game = HR/G) %>% 
+  lm(avg_attendance ~ HR_per_game, data = .) %>% 
+  .$coef %>%
+  .[2]
+```
+
+Question 1b
+
+Use number of wins to predict average attendance; do not normalize for number of games.
+
+For every game won in a season, how much does average attendance increase?
+```{r}
+Teams_small %>% 
+  lm(avg_attendance ~ W, data = .) %>%
+  .$coef %>%
+  .[2]
+```
+Suppose a team won zero games in a season.
+
+Predict the average attendance.
+```{r}
+Teams_small %>% 
+  lm(avg_attendance ~ W, data = .) %>%
+  .$coef %>%
+  .[1]
+```
+Use year to predict average attendance.
+
+How much does average attendance increase each year?
+```{r}
+Teams_small %>% 
+  lm(avg_attendance ~ yearID, data = .) %>%
+  .$coef %>%
+  .[2]
+
+```
+Game wins, runs per game and home runs per game are positively correlated with attendance. We saw in the course material that runs per game and home runs per game are correlated with each other. Are wins and runs per game or wins and home runs per game correlated? Use the Teams_small data once again.
+
+What is the correlation coefficient for runs per game and wins?
+```{r}
+cor(Teams_small$W, Teams_small$R/Teams_small$G)
+```
+What is the correlation coefficient for home runs per game and wins?
+```{r}
+cor(Teams_small$W, Teams_small$HR/Teams_small$G)
+```
+
+Stratify Teams_small by wins: divide number of wins by 10 and then round to the nearest integer. Keep only strata 5 through 10, which have 20 or more data points.
+
+Use the stratified dataset to answer this three-part question.
+How many observations are in the 8 win strata?
+```{r}
+dat <- Teams_small %>%
+    mutate(W_strata = round(W/10)) %>%
+    filter(W_strata >= 5 & W_strata <= 10)
+sum(dat$W_strata == 8)
+```
+
+Calculate the slope of the regression line predicting average attendance given runs per game for each of the win strata.
+
+Which win stratum has the largest regression line slope?
+
+```{r}
+dat %>%  
+  group_by(W_strata) %>%
+  summarize(slope = cor(R/G, avg_attendance)*sd(avg_attendance)/sd(R/G))
+```
+Calculate the slope of the regression line predicting average attendance given HR per game for each of the win strata.
+
+Which win stratum has the largest regression line slope?
+
+```{r}
+dat %>%  
+  group_by(W_strata) %>%
+  summarize(slope = cor(HR/G, avg_attendance)*sd(avg_attendance)/sd(HR/G))
+```
+Fit a multivariate regression determining the effects of runs per game, home runs per game, wins, and year on average attendance. Use the original Teams_small wins column, not the win strata from question 3.
+
+What is the estimate of the effect of runs per game on average attendance?
+```{r}
+fit <- Teams_small %>% 
+    mutate(R_per_game = R/G,
+           HR_per_game = HR/G) %>%
+    lm(avg_attendance ~ R_per_game + HR_per_game + W + yearID, data = .)
+tidy(fit) %>%
+    filter(term == "R_per_game") %>%
+    pull(estimate)
+```
+
+What is the estimate of the effect of home runs per game on average attendance?
+```{r}
+tidy(fit) %>%
+    filter(term == "HR_per_game") %>%
+    pull(estimate)
+```
+
+What is the estimate of the effect of number of wins in a season on average attendance?
+```{r}
+tidy(fit) %>%
+    filter(term == "W") %>%
+    pull(estimate)
+```
+Use the multivariate regression model from Question 4. Suppose a team averaged 5 runs per game, 1.2 home runs per game, and won 80 games in a season.
+
+What would this team's average attendance be in 2002?
+```{r}
+predict(fit, data.frame(R_per_game = 5, HR_per_game = 1.2, W = 80, yearID = 2002))
+```
+
+What would this team's average attendance be in 1960?
+```{r}
+predict(fit, data.frame(R_per_game = 5, HR_per_game = 1.2, W = 80, yearID = 1960))
+```
+
+Use your model from Question 4 to predict average attendance for teams in 2002 in the original Teams data frame.
+
+What is the correlation between the predicted attendance and actual attendance?
+```{r}
+newdata <- Teams %>%
+    filter(yearID == 2002) %>%
+    mutate(avg_attendance = attendance/G,
+           R_per_game = R/G,
+           HR_per_game = HR/G)
+preds <- predict(fit, newdata)
+cor(preds, newdata$avg_attendance)
+```
+Correlation is Not Causation: Spurious Correlation
+```{r}
+# generate the Monte Carlo simulation
+N <- 25
+g <- 1000000
+sim_data <- tibble(group = rep(1:g, each = N), x = rnorm(N * g), y = rnorm(N * g))
+
+# calculate correlation between X,Y for each group
+res <- sim_data %>% 
+  group_by(group) %>% 
+  summarize(r = cor(x, y)) %>% 
+  arrange(desc(r))
+res
+
+# plot points from the group with maximum correlation
+sim_data %>% filter(group == res$group[which.max(res$r)]) %>%
+  ggplot(aes(x, y)) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+  
+# histogram of correlation in Monte Carlo simulations
+res %>% ggplot(aes(x=r)) + geom_histogram(binwidth = 0.1, color = "black")
+
+# linear regression on group with maximum correlation
+library(broom)
+sim_data %>% 
+  filter(group == res$group[which.max(res$r)]) %>%
+  do(tidy(lm(y ~ x, data = .)))
+
+```
+Correlation is Not Causation: Reversing Cause and Effect
+```{r}
+# cause and effect reversal using son heights to predict father heights
+library(HistData)
+data("GaltonFamilies")
+GaltonFamilies %>%
+  filter(childNum == 1 & gender == "male") %>%
+  select(father, childHeight) %>%
+  rename(son = childHeight) %>% 
+  do(tidy(lm(father ~ son, data = .)))
+```
+Correlation is Not Causation: Confounders
+```{r}
+# UC-Berkeley admission data
+library(dslabs)
+data(admissions)
+admissions
+
+# percent men and women accepted
+admissions %>% group_by(gender) %>% 
+  summarize(percentage = 
+              round(sum(admitted*applicants)/sum(applicants),1))
+              
+# test whether gender and admission are independent
+admissions %>% group_by(gender) %>% 
+  summarize(total_admitted = round(sum(admitted / 100 * applicants)), 
+            not_admitted = sum(applicants) - sum(total_admitted)) %>%
+  select(-gender) %>% 
+  do(tidy(chisq.test(.)))
+  
+# percent admissions by major
+admissions %>% select(major, gender, admitted) %>%
+  spread(gender, admitted) %>%
+  mutate(women_minus_men = women - men)
+  
+# plot total percent admitted to major versus percent women applicants
+admissions %>% 
+  group_by(major) %>% 
+  summarize(major_selectivity = sum(admitted * applicants) / sum(applicants),
+            percent_women_applicants = sum(applicants * (gender=="women")) /
+                                             sum(applicants) * 100) %>%
+  ggplot(aes(major_selectivity, percent_women_applicants, label = major)) +
+  geom_text()
+  
+# plot number of applicants admitted and not
+admissions %>%
+  mutate(yes = round(admitted/100*applicants), no = applicants - yes) %>%
+  select(-applicants, -admitted) %>%
+  gather(admission, number_of_students, -c("major", "gender")) %>%
+  ggplot(aes(gender, number_of_students, fill = admission)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(. ~ major)
+
+admissions %>% 
+  mutate(percent_admitted = admitted * applicants/sum(applicants)) %>%
+  ggplot(aes(gender, y = percent_admitted, fill = major)) +
+  geom_bar(stat = "identity", position = "stack")
+
+# condition on major and then look at differences
+admissions %>% ggplot(aes(major, admitted, col = gender, size = applicants)) + geom_point()
+
+# average difference by major
+admissions %>%  group_by(gender) %>% summarize(average = mean(admitted))
+
+```
+In the videos, we ran one million tests of correlation for two random variables, X and Y.
+
+How many of these correlations would you expect to have a significant p-value (), just by chance?
+
+The p-value is defined as the probability of finding the observed result when the null hypothesis (no correlation) is true. When we have a p-value of 0.05, this means the chance of finding a correlation when none exists is 5% - e.g., 0.05*1,000,000 chances, which is 50,000.
+
+For this set of exercises, we examine the data from a 2014 PNAS paper that analyzed success rates from funding agencies in the Netherlands External link and concluded:
+
+"our results reveal gender bias favoring male applicants over female applicants in the prioritization of their "quality of researcher" (but not "quality of proposal") evaluations and success rates, as well as in the language used in instructional and evaluation materials."
+
+A response was published a few months later titled No evidence that gender contributes to personal research funding success in The Netherlands: A reaction to Van der Lee and Ellemers External link, which concluded:
+
+However, the overall gender effect borders on statistical significance, despite the large sample. Moreover, their conclusion could be a prime example of Simpson’s paradox; if a higher percentage of women apply for grants in more competitive scientific disciplines (i.e., with low application success rates for both men and women), then an analysis across all disciplines could incorrectly show "evidence" of gender inequality. 
+
+Who is right here: the original paper or the response? Here, you will examine the data and come to your own conclusion.
+
+The main evidence for the conclusion of the original paper comes down to a comparison of the percentages. The information we need was originally in Table S1 in the paper, which we include in dslabs:
+
+```{r}
+library(dslabs)
+data("research_funding_rates")
+research_funding_rates
+```
+
+Construct a two-by-two table of gender (men/women) by award status (awarded/not) using the total numbers across all disciplines.
+
+What is the number of men not awarded?
+```{r}
+two_by_two <- research_funding_rates %>% 
+    select(-discipline) %>% 
+    summarize_all(list(sum)) %>%
+    summarize(yes_men = awards_men, 
+              no_men = applications_men - awards_men, 
+              yes_women = awards_women, 
+              no_women = applications_women - awards_women) %>%
+    gather %>%
+    separate(key, c("awarded", "gender")) %>%
+    spread(gender, value)
+  two_by_two
+```
+Use the two-by-two table from Question 1 to compute the percentages of men awarded versus women awarded.
+
+What is the percentage of men awarded?
+```{r}
+two_by_two %>% 
+    mutate(men = round(men/sum(men)*100, 1), women = round(women/sum(women)*100, 1)) %>%
+    filter(awarded == "yes") %>%
+    pull(men)
+```
+
+What is the percentage of women awarded?
+```{r}
+two_by_two %>% 
+    mutate(men = round(men/sum(men)*100, 1), women = round(women/sum(women)*100, 1)) %>%
+    filter(awarded == "yes") %>%
+    pull(women)
+```
+
+Run a chi-squared test External link on the two-by-two table to determine whether the difference in the two success rates is significant. (You can use tidy() to turn the output of chisq.test() into a data frame as well.)
+
+What is the p-value of the difference in funding rate?
+```{r}
+two_by_two %>% select(-awarded) %>% chisq.test() %>% tidy() %>% pull(p.value)
+```
+
+There may be an association between gender and funding. But can we infer causation here? Is gender bias causing this observed difference? The response to the original paper claims that what we see here is similar to the UC Berkeley admissions example. Specifically they state that this "could be a prime example of Simpson’s paradox; if a higher percentage of women apply for grants in more competitive scientific disciplines, then an analysis across all disciplines could incorrectly show 'evidence' of gender inequality."
+
+To settle this dispute, use this dataset with number of applications, awards, and success rate for each gender:
+```{r}
+dat <- research_funding_rates %>% 
+      mutate(discipline = reorder(discipline, success_rates_total)) %>%
+      rename(success_total = success_rates_total,
+             success_men = success_rates_men,
+             success_women = success_rates_women) %>%
+      gather(key, value, -discipline) %>%
+      separate(key, c("type", "gender")) %>%
+      spread(type, value) %>%
+      filter(gender != "total")
+dat
+```
+
+To check if this is a case of Simpson's paradox, plot the success rates versus disciplines, which have been ordered by overall success, with colors to denote the genders and size to denote the number of applications.
+
+In which fields do men have a higher success rate than women?
+```{r}
+dat %>% 
+      ggplot(aes(discipline, success, size = applications, color = gender)) + 
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+      geom_point()
+```
+
